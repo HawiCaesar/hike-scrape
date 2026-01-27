@@ -57,6 +57,115 @@ const scrollToBottom = async (page: Awaited<ReturnType<typeof Stagehand.prototyp
   }
 };
 
+// Schema for calendar events (first pass - just names and dates)
+const CalendarEventsSchema = z.object({
+  events: z.array(
+    z.object({
+      name: z.string().describe("Name of the event/hike"),
+      date: z.string().describe("Date of the event"),
+    })
+  ),
+});
+
+// Schema for single hike details
+const HikeDetailSchema = z.object({
+  name: z.string().describe("Name of the hike or adventure"),
+  location: z.string().optional().describe("Location or destination of the hike"),
+  date: z.string().optional().describe("Date of the hike"),
+  time: z.string().optional().describe("Meeting or departure time"),
+  meetingPoint: z.string().optional().describe("Meeting point or pickup location"),
+  cost: z.string().optional().describe("Cost or price of the hike"),
+  contact: z.string().optional().describe("Contact information (phone, email, or social media)"),
+});
+
+// Special scraper for Avi Expeditions calendar view
+const scrapeAviExpeditions = async (
+  stagehand: Stagehand,
+  page: Awaited<ReturnType<typeof Stagehand.prototype.context.pages>>[0],
+  targetDates: string
+): Promise<ScrapedResult> => {
+  const url = "https://aviexpeditions.com/events/month";
+  const companyName = "Avi Expeditions";
+
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    // Try to close any popups/cookie banners
+    try {
+      await stagehand.act("close any popup, cookie banner, or accept button if visible", {
+        timeout: 5000,
+      });
+    } catch {
+      // No popup to close, continue
+    }
+
+    // First, find events on the calendar that match target dates
+    const calendarEvents = await stagehand.extract(
+      `Look at this calendar and find ONLY events scheduled for ${targetDates}.
+       
+       IMPORTANT RULES:
+       - ONLY include events happening on ${targetDates} - no other dates
+       - If there are NO events on these specific dates, return an EMPTY array
+       - DO NOT return events for other dates
+       
+       Return the event names and their exact dates from the calendar.
+       If no events match ${targetDates}, return an empty events array.`,
+      CalendarEventsSchema
+    );
+
+    const hikes: HikeData["hikes"] = [];
+
+    // If no events found, return early
+    if (calendarEvents.events.length === 0) {
+      return { company: companyName, url, hikes: [] };
+    }
+
+    // Click into each event to get full details
+    for (const event of calendarEvents.events) {
+      try {
+        // Click on the event in the calendar
+        await stagehand.act(`click on the "${event.name}" event link on the calendar`);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        // Scroll to load content
+        await scrollToBottom(page);
+
+        // Extract full details from the event page
+        const details = await stagehand.extract(
+          `Extract all details about this hike/event from this page:
+           - Name of the hike
+           - Location or destination
+           - Date
+           - Time (meeting time, departure time)
+           - Meeting point or pickup location
+           - Cost/price
+           - Contact information (phone, email, WhatsApp)`,
+          HikeDetailSchema
+        );
+
+        hikes.push(details);
+
+        // Go back to calendar
+        await page.goBack();
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      } catch (eventError) {
+        console.error(`Error extracting details for ${event.name}:`, eventError);
+        // If clicking fails, add basic info and continue
+        hikes.push({
+          name: event.name,
+          date: event.date,
+        });
+      }
+    }
+
+    return { company: companyName, url, hikes };
+  } catch (error) {
+    console.error(`Error scraping ${companyName}:`, error);
+    return { company: companyName, url, hikes: [] };
+  }
+};
+
 // Scrape a single website for hike information
 const scrapeWebsite = async (
   stagehand: Stagehand,
@@ -183,7 +292,7 @@ async function main() {
       company: "Matembezi Travel",
     },
     {
-      url: "https://aviexpeditions.com/events/",
+      url: "https://aviexpeditions.com/events/month",
       company: "Avi Expeditions",
     },
   ];
@@ -204,7 +313,15 @@ async function main() {
 
   // Scrape each website
   for (const site of websites) {
-    const result = await scrapeWebsite(stagehand, page, site.url, site.company, targetDates);
+    let result: ScrapedResult;
+    
+    // Use special scraper for Avi Expeditions (calendar UI)
+    if (site.company === "Avi Expeditions") {
+      result = await scrapeAviExpeditions(stagehand, page, targetDates);
+    } else {
+      result = await scrapeWebsite(stagehand, page, site.url, site.company, targetDates);
+    }
+    
     results.push(result);
   }
 
